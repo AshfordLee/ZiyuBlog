@@ -6,7 +6,7 @@ tags: ['CS189']
 # heroImage: { src: './thumbnail.jpg', alt: '作业封面图片' }
 # heroImage: {}
 language: '中文'
-draft: true
+draft: false
 ---
 
 
@@ -601,3 +601,636 @@ plot_metrics(dna_train_losses, dna_val_losses, dna_train_accuracies, dna_val_acc
 ## Problem 4i
 
 生成一份预测结果csv, 一键运行代码即可(只要前面的模型训练好了)
+
+
+## 第二部分: 声音分类
+
+### wav数据
+
+现在我们来处理一个更麻烦的任务, 给出一些`.wav`的文件, 这些声音来自不同的源, 比如说有些可能是空调的声音, 有些是狗叫, 目标是做这个分类
+
+比较麻烦的点在于, 要先把这些`.wav`文件变成正常的数据格式, 这一点我们用`torchaudio`来实现
+
+文件名里面有一个整数代表`class_id`, 这也是我们需要的label
+
+本实验要用到交叉验证, 也就是把数据分为多个"折"(fold), 每次用`n-1`个折来训练, 用剩下的一个折来测试, 然后这个过程可以重复n次, 每次用一个不同的折来做测试
+
+>```python
+>class_id_to_sound = {
+>    0: "air_conditioner",
+>    1: "car_horn",
+>    2: "children_playing",
+>    3: "dog_bark",
+>    4: "drilling",
+>    5: "engine_idling",
+>    6: "gun_shot",
+>    7: "jackhammer",
+>    8: "siren",
+>    9: "street_music"
+> }
+>```
+
+课程组给了一些示例代码来播放`.wav`文件, 因为我是服务器环境所以听不到, 如果在本地应该是可以听的, 不过记住要配好`pygame`环境
+
+```python
+# audio_file = '/content/drive/MyDrive/cs189/hw/hw4/data/fold1_train/101415-3-0-2.wav'
+audio_file = './data/fold1_train/101415-3-0-2.wav'
+
+os.environ['SDL_AUDIODRIVER'] = 'dummy'
+# no sound on server
+
+if IS_COLAB:
+    from IPython.display import Audio, display
+    display(Audio(audio_file, autoplay=False))
+else:
+    import pygame
+    pygame.mixer.init()
+    pygame.mixer.music.load(audio_file)
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        pygame.time.Clock().tick(10)
+```
+
+### 频谱图
+
+接下来要把这个音频变成频谱图, 频谱图X轴是时间, Y轴是频率, 我们只要实例化一个torchaudio.transforms.Spectrogram就行了, 然后把这个变换应用到原始文件上去
+
+```python
+spectrogram_transform = torchaudio.transforms.Spectrogram(n_fft=1024, normalized=True)
+
+class_id_to_sound = {
+    0: "air_conditioner",
+    1: "car_horn",
+    2: "children_playing",
+    3: "dog_bark",
+    4: "drilling",
+    5: "engine_idling",
+    6: "gun_shot",
+    7: "jackhammer",
+    8: "siren",
+    9: "street_music"
+}
+
+# audio_file = '/content/drive/MyDrive/cs189/hw/hw4/data/fold1/101415-3-0-2.wav'
+audio_file = './data/fold1_train/101415-3-0-2.wav'
+
+try:
+    # Read WAV file
+    waveform, sample_rate = torchaudio.load(audio_file)
+
+    # Converts stero to mono by averaging channels. Shape becomes [1, num_samples]
+    waveform = waveform.mean(dim=0, keepdim=True)
+
+    # Transform the waveform into a spectrogram
+    spec = spectrogram_transform(waveform) # torch.Tensor of shape [1, freq_bins, time_bins]
+
+    # Print the shape of the spectrogram
+    print(f"Spectrogram shape: {spec.shape}") # shape [num_frequencies, num_time_bins]
+
+    # Visualize the spectrogram
+    plt.figure()
+    plt.imshow(spec.log2()[0, :, :].numpy(), aspect='auto', origin='lower') # origin = 'lower' sets input[0, 0] at bottom left
+    plt.title(f"Spectrogram: {audio_file.split('/')[-1]}")
+    plt.xlabel("Time bins")
+    plt.ylabel("Frequency")
+    plt.show()
+except Exception as e:
+    print(f"Error processing {audio_file}: {e}")
+```
+
+运行他给的代码可以看到频谱图
+
+<img src="/images/189_hw4/hw4_7.png" alt="label_plot" />
+
+这本质上就是个二维图像了
+
+## Problem 5a
+
+组建`Dataset`, 几个要注意的点:
+
+1. 从文件名里面把正确的分类拿出来(label)返回
+2. 把频谱图的尺寸(1, H, W)通过`repeat`变成(3, H, W)
+3. 如果传入了额外的`transform`参数, 记得在repeat之后应用
+
+这里`repeat`的作用就是沿着第0维复制3次把通道数变成3, 以便于适配后面的输入
+
+
+```python
+class SpectrogramDataset(Dataset):
+    def __init__(self, audio_dir, transforms=None, spectrogram_transform=None, return_targets=True):
+        super().__init__()
+        self.audio_dir = audio_dir # Folder where the audio files will be located
+        self.transforms = transforms # Additional image transforms
+        self.spectrogram_transform = spectrogram_transform or torchaudio.transforms.Spectrogram(n_fft=1024, normalized=True)
+        self.return_targets = return_targets  # Whether to return targets or not when __get_item__ is called
+        try:
+            # Get file paths of all .wav files in the provided directory
+            self.file_paths = [f for f in os.listdir(audio_dir) if f.endswith('.wav')]
+        except Exception as e:
+            print(f"Error accessing files at {audio_dir}: {e}")
+            self.file_paths = []
+
+    def __len__(self):
+        # TODO: 1. Return the number of samples in the dataset
+        return len(self.file_paths)
+
+    def __getitem__(self, index):
+        # Get the file name by index
+        file_name = self.file_paths[index]
+
+        # Construct the path to the requested audio file
+        filepath = os.path.join(self.audio_dir, file_name)
+
+        # TODO: 2. Extract the target class_id from the file path if return_targets is True
+        # Hint: Files are stored in the format [freesoundID]-[classID]-[occurrenceID]-[sliceID].wav
+        # Don't forget to cast the class_id to dtype=torch.long for loss functions!
+        if self.return_targets:
+            target = int(file_name.split('-')[1])
+            target = torch.tensor(target,dtype=torch.long)
+
+        try:
+            # TODO: 3. Load the audio file located at `filepath`
+            waveform, sample_rate = torchaudio.load(filepath)
+            # TODO: 4. Convert stereo to mono by averaging channels.
+            waveform = waveform.mean(dim=0,keepdim=True)
+
+            # TODO: 5. Generate a spectrogram of the waveform. Expected shape: (1, H, W)
+            spec = self.spectrogram_transform(waveform)
+
+            # TODO: 6. Copy the spectrogram into 3 channels to get shape: (3, H, W)
+            spec = spec.repeat(3,1,1)
+
+            # TODO: 7. Apply transformations
+            if self.transforms:
+                spec = self.transforms(spec)
+
+            if self.return_targets:
+                return spec, target
+            else:
+                return spec
+        except Exception as e:
+            print(f'Error processing {filepath}: {e}')
+            if self.return_targets:
+                return None, None
+            else:
+                return None
+```
+
+
+## Problem 5b
+
+把Dataset实例化后装到DataLoader里面去
+
+```python
+from torch.utils.data import Subset
+
+# TODO: Define a transform to resize images to (224, 224)
+resize_transform = torchvision.transforms.Resize((224,224))
+
+# TODO: Instantiate a SpectrogramDataset using the folder fold1
+spectrogram_dataset = SpectrogramDataset(audio_dir='data/fold1_train',transforms=resize_transform,return_targets=True)
+
+# TODO: Create a 0.8 training and 0.2 test split
+indices=list(range(len(spectrogram_dataset)))
+train_indices,test_indices=train_test_split(
+    indices,
+    test_size=0.2,
+    random_state=SEED,
+    shuffle=True
+)
+spectrogram_train_dataset, spectrogram_test_dataset = Subset(spectrogram_dataset,train_indices),Subset(spectrogram_dataset,test_indices)
+
+# TODO: Create training and testing dataloaders
+spectrogram_train_dataloader = DataLoader(spectrogram_train_dataset,batch_size=32,shuffle=True)
+spectrogram_test_dataloader = DataLoader(spectrogram_test_dataset,batch_size=32,shuffle=False)
+
+# Printing out the shapes of data and targets in the first batch!
+batch = next(iter(spectrogram_train_dataloader))
+
+data, targets = batch
+print(f"Shape of 1 batch of data: {data.shape}")
+print(f"Shape of 1 batch of targets: {targets.shape}")
+```
+
+公式化代码, 没什么好说的
+
+```
+Shape of 1 batch of data: torch.Size([32, 3, 224, 224])
+Shape of 1 batch of targets: torch.Size([32])
+```
+
+## Problem 5c
+
+实现训练循环
+
+```python
+def train_image_classifier(model, optimizer, criterion, device, num_epochs, train_dataloader, val_dataloader):
+    """
+    Args:
+        model: the model to train
+        optimizer: the optimizer to use
+        criterion: the loss function to use
+        num_epochs: the number of epochs to train for
+        train_dataloader: the dataloader for the training set
+        val_dataloader: the dataloader for the validation set
+    Returns:
+        train_losses: a list of training losses for each epoch
+        val_losses: a list of validation losses for each epoch
+        train_accuracies: a list of training accuracies for each epoch
+        val_accuracies: a list of validation accuracies for each epoch
+    """
+    # === SETUP ===
+    model.to(device)
+
+    # Lists to store metrics across epochs
+    train_losses = []
+    val_losses = []
+    train_accuracies = []
+    val_accuracies = []
+
+    # === EPOCH LOOP ===
+    for epoch in range(num_epochs):
+        # === TRAINING PHASE ===
+        model.train() # Set model to training mode
+
+        # Initialize metrics for this epoch
+        train_loss = 0.0
+        train_correct = 0
+
+        # === INNER LOOP (iterate over training batches) ===
+        for batch in train_dataloader:
+            # TODO 1: Move the data and targets to device and cast them to the appropriate dtypes
+            x, y = batch
+            x, y = x.to(device),y.to(device)
+
+            # TODO 2: Reset gradients
+            optimizer.zero_grad()
+
+            # TODO 3: Forward pass: pass inputs to model
+            y_hat = model(x)
+
+            # TODO 4: Compute loss
+            loss = criterion(y_hat,y)
+
+            # TODO 5: Backward pass/compute gradients
+            loss.backward()
+
+            # TODO 6: Update parameters
+            optimizer.step()
+
+            # TODO 7: Track training metrics for this epoch
+            train_loss+=loss.item()
+            _, preds = torch.max(y_hat,dim=1)
+            train_correct+=torch.sum(preds==y).item()
+
+        # === END OF INNER LOOP ===
+
+        # Compute average training metrics for the epoch
+        train_loss /= len(train_dataloader)
+        train_acc = train_correct / len(train_dataloader.dataset)
+
+        # Append this epoch's training metrics to history
+        train_losses.append(train_loss)
+        train_accuracies.append(train_acc)
+
+        print(f"Epoch {epoch + 1}: Training loss = {train_loss}\tTrain accuracy = {train_acc}")
+
+        # === END OF TRAINING PHASE ===
+
+        # === VALIDATION PHASE ===
+        model.eval() # set model to evaluation mode
+        val_loss = 0.0
+        val_correct = 0
+
+        with torch.no_grad():
+            # === INNER LOOP (iterate over validation batches) ===
+            for batch in val_dataloader:
+                # TODO 8: Move the data and targets to device and cast them to the appropriate dtypes
+                x, y = batch
+                x, y = x.to(device),y.to(device)
+
+                # TODO 9: Forward pass only
+                y_hat = model(x)
+
+                # TODO 10: Compute loss
+                loss = criterion(y_hat,y)
+
+                # TODO 11: Track validation metrics
+                val_loss+=loss.item()
+                _, preds = torch.max(y_hat,dim=1)
+                val_correct+=torch.sum(preds==y).item()
+
+            # === END OF INNER LOOP ===
+
+            val_loss /= len(val_dataloader)
+            val_acc = val_correct / len(val_dataloader.dataset)
+
+        val_losses.append(val_loss)
+        val_accuracies.append(val_acc)
+        print(f"Epoch {epoch + 1}: Validation loss = {val_loss}\tValidation accuracy = {val_acc}")
+
+        # === END OF VALIDATION PHASE ===
+
+    # === END OF EPOCH LOOP ===
+
+    print(f"=" * 20 + " Final Metrics " + "=" * 20)
+    print(f"Final training loss: {train_losses[-1]:.5f}\tFinal training accuracy = {train_accuracies[-1]:.5f}")
+    print(f"Final validation loss: {val_losses[-1]:.5f}\tFinal validation accuracy = {val_accuracies[-1]:.5f}")
+    print(f"=" * 55)
+
+    # Return history
+    return train_losses, val_losses, train_accuracies, val_accuracies
+```
+
+## Problem 5d
+
+这里用的模型是在ImageNet上预训练好的ConvNeXt模型, 他的最后一层的全连层的输出是1000维的, 我们要改成10维, 因为这是个10-分类问题
+
+```python
+def replace_final_convnext_linear_layer(model, num_classes=10):
+    # TODO: Access the classifier module of the model
+    classifier = model.classifier[-1]
+
+    # TODO: Get the input dimensions of the classifier's last linear layer
+    in_features = classifier.in_features
+
+    # TODO: replace the model's last linear layer with a new linear layer
+    model.classifier[-1] = nn.Linear(in_features,num_classes)
+
+    return model
+```
+
+## 预训练与微调简介
+
+所谓预训练就是直接用别人调好了参数的模型, 比如在`ImageNet`上预训练好了的`resnet50`
+
+```python
+model = resnet50(weights = ResNet50_Weights.IMAGENET1K_V2)
+```
+
+当然也可以自己初始化一版模型参数
+
+```python
+model = resnet50(weights = None)
+```
+
+微调有好几种方式:
+
+1. 从Scratch训练, 用随机的初始化参数
+
+2. 采用预训练好的参数, 并且冻结除了最后一个分类头之外的所有参数, 只训练最后那个Linear Layer
+
+3. 全量微调, 用预训练好的参数但是所有参数都可以再次进行训练
+
+
+实验也给出了冻结某一层的参数的方式:
+
+```python
+for name, param in frozen_backbone.named_parameters():
+    if "classifier" not in name: # Freeze any non-classifier layers
+        param.requires_grad = False
+```
+
+所谓"冻结"也就是是否允许参数被更改, 当然也就是设置这个梯度的bool
+
+## Problem 5e
+
+用全部的数据来从头训练convnext模型
+
+```python
+# TODO: Load a ConvNeXt model with uninitialized weights
+uninitialized_convnext = convnext_base(weights=None)
+
+# TODO: Replace the final classification layer of the ConvNeXt
+uninitialized_convnext = replace_final_convnext_linear_layer(model=uninitialized_convnext, num_classes=10)
+
+# TODO: Initialize the optimizer
+optimizer = AdamW(params=uninitialized_convnext.parameters(),lr=1e-4)
+
+# TODO: Define the loss function
+criterion = nn.CrossEntropyLoss()
+
+# TODO: Train your model for 5 epochs
+unintialized_train_losses, unintialized_val_losses, unintialized_train_accuracies, unintialized_val_accuracies = train_image_classifier(
+    model=uninitialized_convnext, 
+    train_dataloader=spectrogram_train_dataloader, 
+    val_dataloader=spectrogram_test_dataloader, 
+    optimizer=optimizer, 
+    num_epochs=5,
+    criterion=criterion, 
+    device=device)
+
+# TODO: Plot the metrics
+plot_metrics(unintialized_train_losses, unintialized_val_losses, unintialized_train_accuracies, unintialized_val_accuracies)
+```
+
+```
+Epoch 1: Training loss = 2.3848066329956055	Train accuracy = 0.1774193548387097
+Epoch 1: Validation loss = 2.237703227996826	Validation accuracy = 0.20714285714285716
+Epoch 2: Training loss = 2.1374161640803018	Train accuracy = 0.21505376344086022
+Epoch 2: Validation loss = 2.2762171745300295	Validation accuracy = 0.2357142857142857
+Epoch 3: Training loss = 2.1253870791859097	Train accuracy = 0.23297491039426524
+Epoch 3: Validation loss = 2.116562104225159	Validation accuracy = 0.2
+Epoch 4: Training loss = 2.0567029780811734	Train accuracy = 0.2078853046594982
+Epoch 4: Validation loss = 2.0853104829788207	Validation accuracy = 0.19285714285714287
+Epoch 5: Training loss = 2.0093974073727927	Train accuracy = 0.22580645161290322
+Epoch 5: Validation loss = 2.036539649963379	Validation accuracy = 0.2642857142857143
+==================== Final Metrics ====================
+Final training loss: 2.00940	Final training accuracy = 0.22581
+Final validation loss: 2.03654	Final validation accuracy = 0.26429
+=======================================================
+```
+
+注意这里的学习率是超参数, 可以调的
+
+## Problem 5f
+
+冻结除了分类头以外的层, 只训练分类头
+
+```python
+# TODO: Load a ConvNeXt model with pretrained weights
+frozen_backbone = convnext_base(weights=ConvNeXt_Base_Weights.IMAGENET1K_V1)
+
+# TODO: Replace the final classification layer of the ConvNeXt
+frozen_backbone = replace_final_convnext_linear_layer(model=frozen_backbone, num_classes=10)
+
+# TODO: Freeze the ConvNeXt's backbone
+for name,param in frozen_backbone.named_parameters():
+    if "classifier" not in name:
+        param.requires_grad = False
+    
+    else:
+        param.requires_grad=True
+
+# TODO: Initialize the optimizer
+optimizer = AdamW(params=frozen_backbone.parameters(),lr=1e-4)
+
+# TODO: Define the loss function
+criterion = nn.CrossEntropyLoss()
+
+# TODO: Train your model for 5 epochs
+frozen_bb_train_losses, frozen_bb_val_losses, frozen_bb_train_accuracies, frozen_bb_val_accuracies = train_image_classifier(
+    model=frozen_backbone, 
+    train_dataloader=spectrogram_train_dataloader, 
+    val_dataloader=spectrogram_test_dataloader, 
+    optimizer=optimizer, 
+    criterion=criterion, 
+    num_epochs=5,
+    device=device)
+
+# TODO: Plot the metrics
+plot_metrics(frozen_bb_train_losses, frozen_bb_val_losses, frozen_bb_train_accuracies, frozen_bb_val_accuracies)
+```
+
+```
+Epoch 1: Training loss = 2.303494784567091	Train accuracy = 0.08064516129032258
+Epoch 1: Validation loss = 2.2263582229614256	Validation accuracy = 0.17142857142857143
+Epoch 2: Training loss = 2.220644950866699	Train accuracy = 0.18100358422939067
+Epoch 2: Validation loss = 2.1564966201782227	Validation accuracy = 0.17857142857142858
+Epoch 3: Training loss = 2.168804738256666	Train accuracy = 0.21863799283154123
+Epoch 3: Validation loss = 2.100537633895874	Validation accuracy = 0.22857142857142856
+Epoch 4: Training loss = 2.118125465181139	Train accuracy = 0.25806451612903225
+Epoch 4: Validation loss = 2.0520622968673705	Validation accuracy = 0.3
+Epoch 5: Training loss = 2.068689114517636	Train accuracy = 0.2974910394265233
+Epoch 5: Validation loss = 2.0029944658279417	Validation accuracy = 0.32142857142857145
+==================== Final Metrics ====================
+Final training loss: 2.06869	Final training accuracy = 0.29749
+Final validation loss: 2.00299	Final validation accuracy = 0.32143
+=======================================================
+```
+
+<img src="/images/189_hw4/hw4_8.png" alt="label_plot" />
+
+## Problem 5g
+
+全量微调
+
+```python
+# TODO: Load a ConvNeXt model with pretrained weights
+unfrozen_convnext = convnext_base(weights=ConvNeXt_Base_Weights.IMAGENET1K_V1)
+
+# TODO: Replace the final classification layer of the ConvNeXt
+unfrozen_convnext = replace_final_convnext_linear_layer(model=unfrozen_convnext, num_classes=10)
+
+# TODO: Make sure all the parameters are trainable
+for param in unfrozen_convnext.parameters():
+    param.requires_grad = True
+
+# TODO: Initialize the optimizer
+optimizer = AdamW(params=unfrozen_convnext.parameters(),lr=1e-4)
+
+# TODO: Define the loss function
+criterion = nn.CrossEntropyLoss()
+
+# TODO: Train your model for 5 epochs
+unfrozen_train_losses, unfrozen_val_losses, unfrozen_train_accuracies, unfrozen_val_accuracies = train_image_classifier(
+    model=unfrozen_convnext, 
+    train_dataloader=spectrogram_train_dataloader, 
+    val_dataloader=spectrogram_test_dataloader, 
+    optimizer=optimizer, 
+    num_epochs=5,
+    criterion=criterion, 
+    device=device)
+
+# TODO: Plot the metrics
+plot_metrics(unfrozen_train_losses, unfrozen_val_losses, unfrozen_train_accuracies, unfrozen_val_accuracies)
+```
+
+```
+Epoch 1: Training loss = 1.8407021694713168	Train accuracy = 0.3888888888888889
+Epoch 1: Validation loss = 1.1633551120758057	Validation accuracy = 0.7
+Epoch 2: Training loss = 0.9334362381034427	Train accuracy = 0.7419354838709677
+Epoch 2: Validation loss = 0.5684262037277221	Validation accuracy = 0.85
+Epoch 3: Training loss = 0.4550878521468904	Train accuracy = 0.8888888888888888
+Epoch 3: Validation loss = 0.4825403094291687	Validation accuracy = 0.8357142857142857
+Epoch 4: Training loss = 0.3048595061732663	Train accuracy = 0.9068100358422939
+Epoch 4: Validation loss = 0.3036103412508965	Validation accuracy = 0.9
+Epoch 5: Training loss = 0.19161400902602407	Train accuracy = 0.946236559139785
+Epoch 5: Validation loss = 0.3878093510866165	Validation accuracy = 0.8785714285714286
+==================== Final Metrics ====================
+Final training loss: 0.19161	Final training accuracy = 0.94624
+Final validation loss: 0.38781	Final validation accuracy = 0.87857
+=======================================================
+```
+
+<img src="/images/189_hw4/hw4_9.png" alt="label_plot" />
+
+## Problem 5h
+
+分析一下上面三种方式(从Scratch训练, 冻结除了分类头以外的层, 全量微调)的绩效
+
+```
+Pretrained + Full Fine-tuning is the most effective approach because it allows the model to adapt to the new dataset and achieve the highest accuracy.
+
+Disadvantages:
+* It requires more data and training time.
+* It may overfit to the new dataset if the amount of data is limited.
+```
+
+## Problem 5i
+
+推理一次, 看看预测的效果
+
+```python
+# TODO 1: Pick an audio file to listen to and save it to the `audio_file` variable
+# audio_file = '/content/drive/MyDrive/cs189/hw/hw4/data/fold1_train/101415-3-0-2.wav'
+audio_file = 'data/fold1_train/101415-3-0-2.wav'
+if IS_COLAB:
+    from IPython.display import Audio, display
+    display(Audio(audio_file, autoplay=False))
+else:
+    import pygame
+    pygame.mixer.init()
+    pygame.mixer.music.load(audio_file)
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        pygame.time.Clock().tick(10)
+
+try:
+    # TODO 2: Load the .wav audio file
+    waveform, sample_rate = torchaudio.load(audio_file)
+
+    # TODO 3: Average the channels to create a single mono channel
+    waveform = waveform.mean(dim=0, keepdim=True)
+
+    # TODO 4: Generate a spectrogram
+    spec = spectrogram_transform(waveform)
+
+    # TODO 5: Resize the spectrogram into the shape (1 x 224 x 224)
+    spec = resize_transform(spec)
+
+    # TODO 6: Repeat the spectrogram 3 times to have 3 channels
+    spec = spec.repeat(3,1,1)
+
+    # TODO 7: Add a batch dimension
+    spec = spec.unsqueeze(0)
+
+    # TODO 8: Move the input to the right device and cast it to the right dtype
+    spec = spec.to(device)
+    spec = spec.float()
+
+    # TODO 9: Get the model's outputs
+    y_hat = unfrozen_convnext(spec)
+
+    # TODO 10: find the class with the highest output score
+    _, pred = torch.max(y_hat,dim=1)
+
+    # TODO 11: Look up the class label of the model's prediction
+    predicted_class = class_id_to_sound[pred.item()]
+
+    # TODO 12: Parse the audio file's name to get the true class ID and the true class label
+    true_class_id = os.path.basename(audio_file).split('-')[1]
+    true_class = class_id_to_sound[int(true_class_id)]
+
+    print(f"Predicted class: {predicted_class}")
+    print(f"True class: {true_class}")
+except Exception as e:
+    print(f'Error processing {audio_file}: {e}')
+
+```
+
+```
+Predicted class: dog_bark
+True class: dog_bark
+```
+
