@@ -1,0 +1,461 @@
+---
+title: 'UC Berkeley CS189 Assignment 5(Part 1)'
+description: 'CS189 Assignment5 Notes'
+publishDate: '2026-2-28'
+tags: ['CS189']
+# heroImage: { src: './thumbnail.jpg', alt: '作业封面图片' }
+# heroImage: {}
+language: '中文'
+draft: false
+---
+
+import { Aside } from 'astro-pure/user'
+
+# CS189 Assignment 5
+
+## 项目介绍
+
+这个lab是关于语言模型微调的, 回忆一下在Assignment4的Part2里面大致介绍了微调, 那里的微调和这里的Qwen-0.5B模型微调主要有以下区别:
+
+1. 前面用的是ConvNeXt模型, 参数比较少, 微调比较方便
+2. 前面的微调数据是.wav化为的二维频谱图, 这里是自然语言, 处理起来要复杂得多
+3. 前面的任务是分类, 这里是在baseline上的QA检测
+4. 这里微调的操作空间大得多, 除了冻结参数, 还有很多超参数可以调整
+
+## 模型配置与加载
+
+### 基础模型配置
+
+```python
+# ============================================================================
+# === CONFIGURATION - ALL SETTINGS IN ONE PLACE ===
+# ============================================================================
+
+# --- Model Configuration ---
+MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct" # YOU CANNOT CHANGE THIS
+
+# --- Dataset Configuration ---
+#TODO: REPLACE WITH YOUR OWN PATH
+MCQ_CSV_PATH = "hw5_sample_eval.csv"  # Path to CS189 MCQ sample eval dataset
+
+# --- Training Configuration (feel free to adjust!) ---
+TRAIN_BATCH_SIZE = 1
+GRADIENT_ACCUMULATION_STEPS = 4
+WARMUP_STEPS = 5
+MAX_STEPS = 50  # or set num_train_epochs instead
+LEARNING_RATE = 1e-5
+WEIGHT_DECAY = 0.01
+LR_SCHEDULER_TYPE = "linear"
+OPTIM = "adamw_8bit"  # requires bitsandbytes
+SEED = 189
+
+# --- Evaluation Configuration ---
+EVAL_MAX_NEW_TOKENS = 64  # How many tokens to generate for inference
+OUTPUT_DIR = "./mcq_finetuned_model"
+```
+
+首先需要加载一个预训练好的模型, 准备一份评测集去算出绩效的baseline, 再设置各种超参数, 比如`batch_size`, 学习率等等
+
+### 评测集一览
+
+所谓评测集其实就是一些单选题, 我们通过模型选对/选错就能评测出绩效了
+
+```
+id,question,A,B,C,D,E,answer
+mcq_1,"Peanut wants to train a model to accurately classify different types of animals from images. After training and testing his model, he observes that the model has high training error and high test error. What can we most confidently say about the bias/variance characteristics of Peanut’s model?",High bias.,Low bias.,High variance.,Low variance.,none of the above,A
+mcq_2,"Consider a binary classification data set with 9000 positively labelled examples and 1000 negatively labelled examples. What is the area under the ROC curve (AUC-ROC) of a random classifier that classifies any example as positive with probability π and as negative with probability 1 − π? Here, the probability π is a hyperparameter.",Close to zero.,Close to 0.1.,Close to 0.5.,Close to 0.9.,Close to one.,C
+mcq_3,"Again, consider a binary classification data set with 9000 positively labelled examples and 1000 negatively labelled examples. What is the precision and the recall of a classifier that always classifies any example as positive?","The precision is 0.1, and the recall is 0.9.","The precision is 0.9, and the recall is 0.1.","The precision is 1.0, and the recall is 0.9.","The precision is 0.9, and the recall is 1.0.","The precision is 0.1, and the recall is 1.0.",D
+mcq_4,"Assume we are given X ∈ Rn×d and y ∈ Rn for n > d. The Ridge regression estimator with regularization coefficient λ estimates the weight vector to be  2 2 wˆ=argmin y−Xw2+λ∥w∥2 . (1) w The Ridge regression estimator is equivalent to the ordinary least squares estimator on which of the following modified version of X and y? Id denotes the d × d identity matrix. 0d denotes the all-zero d-dimensional vector, and 1d denotes the all-one d-dimensional vector.","y′ = [ y; 0d ], X′ = [ X; √λ Id ]","y′ = [ y; 1d ], X′ = [ X; √λ Id ]","y′ = [ y; 0d ], X′ = [ X; λ Id ]","y′ = [ y; 1d ], X′ = [ X; λ Id ]",none of the above,A
+mcq_5,Which of the following statements are TRUE regarding positive semi-definite and positive-definite matrices?,“Every entry of a matrix is non-negative” is a necessary but insufficient condition for a matrix to be positive definite.,The singular values of a positive semi-definite matrix are the same as its eigenvalues.,"If a matrix A is positive semi-definite, then there exists a matrix B such that BT B = A. (heuristic)",The covariance matrix of any distribution is positive semi-definite and invertible.,"If the Jacobian of a function is positive semi-definite, then the function is convex.",B
+```
+
+这些问题涵盖了很多方面, 比如说数学/物理/生活常识等等
+
+### Tokenizer
+除此之外, 我们还需要一个Tokenizer, 这同样也是预训练好的, 不然没法把自然语言变成Token
+
+```python
+# === Load base model & tokenizer ===
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+# Ensure we have a pad token for training
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_NAME,
+    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+    device_map="auto" if torch.cuda.is_available() else None,
+)
+model.resize_token_embeddings(len(tokenizer))
+model.to(device)
+model.eval()
+print('Model loaded.')
+```
+
+提一下上面的Pad Token, 这是为了在训练的时候把不同长度的序列补齐到相同长度
+
+## 准备微调所需的数据
+
+### 格式调整
+
+首先我们需要建立Prompt, 在这个QA体系下就是Question + Options的组合, 课程组已经给出了代码
+
+```python
+# === MCQ helpers ===
+LETTER_SET = set(list("ABCDE"))
+
+def load_mcq_dataset(csv_path: str = MCQ_CSV_PATH):
+    """Load the CS189 MCQ dataset.
+
+    Expected columns:
+        - question
+        - A, B, C, D, E
+        - answer (single letter A-E)
+    """
+    df = pd.read_csv(csv_path)
+    required = ["question", "A", "B", "C", "D", "E", "answer"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in MCQ CSV: {missing}")
+
+    df = df.copy()
+    df["answer"] = (
+        df["answer"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    df = df[df["answer"].isin(LETTER_SET)].reset_index(drop=True)
+    return df
+
+def build_mcq_prompt(row):
+    """Prompt for inference: instruction + question + options.
+
+    The model is expected to answer with the correct letter in \\boxed{} format.
+    """
+    q = str(row["question"]).strip()
+    options = "\n".join([
+        f"A. {row['A']}",
+        f"B. {row['B']}",
+        f"C. {row['C']}",
+        f"D. {row['D']}",
+        f"E. {row['E']}",
+    ])
+    prompt = (
+        "Choose exactly one correct option from A, B, C, D, and E.\n"
+        "Return your answer inside a LaTeX box.\n\n"
+        f"{q}\n\n{options}\n\nAnswer:"
+    )
+    return prompt
+```
+
+实际上就是一些字符串的处理, 因为评测集给的格式非常好, 其实选项和答案都已经给出来了, 所以只要把他们装填成这个特定的数据结构就行了
+
+还给了个辅助函数从选项框里面把答案提取出来:
+
+```python
+def parse_choice_from_boxed(text: str):
+    """Parse an MCQ choice A–E from the model output.
+
+    We first look for a literal '\\boxed{X}' pattern. If not found, we
+    fallback to the last standalone A-E in the decoded text.
+    """
+    if text is None:
+        return None
+    # Direct \\boxed{A} ... \\boxed{E}
+    m = re.search(r"\\boxed\{\s*([A-E])\s*\}", text)
+    if m:
+        return m.group(1)
+    # Fallback: last standalone A–E
+    letters = re.findall(r"\b([A-E])\b", text.upper())
+    if letters:
+        return letters[-1]
+    return None
+```
+
+
+### QA示例
+
+```python
+# === Load MCQ CSV (Evaluation Data) ===
+try:
+    mcq_df = load_mcq_dataset(MCQ_CSV_PATH)
+    print(f"Loaded MCQ dataset with {len(mcq_df)} rows from {MCQ_CSV_PATH}.")
+except Exception as e:
+    mcq_df = None
+    print("Error loading MCQ CSV — check MCQ_CSV_PATH.")
+    raise e
+mcq_df
+```
+
+<img src="/images/189_hw5/1.png" alt="label_plot" />
+
+### OpenAI Style的Prompt
+
+我们需要把input prompt调整成如下的格式:
+
+```
+{"role": "user", "content": "..."}
+```
+
+模型给我们返回
+
+```
+{"role": "assistant", "content": "..."}
+```
+
+在这个MCQ体系下, 具体为:
+
+```
+{"role": "user", "content": "Choose exactly one correct option... [Question] ... [Options]"}
+{"role": "assistant", "content": "\boxed{A}"}
+```
+
+### 加载微调数据集
+
+我们使用的是MMLU数据集, 主要使用里面的机器学习问题部分
+
+```python
+# === MMLU Helper Functions ===
+def load_mmlu_dataset(subset: str = "machine_learning", split: str = "test"):
+    """Load a subset of the MMLU dataset from Hugging Face."""
+    print(f"Loading MMLU dataset (subset={subset}, split={split})...")
+    ds = load_dataset("cais/mmlu", subset, split=split)
+    return ds
+
+def build_mmlu_prompt(row):
+    """Prompt for inference: instruction + question + options."""
+    q = str(row["question"]).strip()
+    choices = row["choices"]
+
+    options_list = []
+    for i, choice in enumerate(choices):
+        letter = chr(ord("A") + i)
+        options_list.append(f"{letter}. {choice}")
+    options_str = "\n".join(options_list)
+
+    prompt = (
+        "Choose exactly one correct option from the choices provided.\n"
+        "Return your answer inside a LaTeX box.\n\n"
+        f"{q}\n\n{options_str}\n\nAnswer:"
+    )
+    return prompt
+
+def build_mmlu_sft_text(row, tokenizer):
+    """Build properly formatted chat template text for training."""
+    user_content = build_mmlu_prompt(row)
+
+    answer_int = row["answer"]
+    answer_letter = chr(ord("A") + answer_int)
+    assistant_content = f"\\boxed{{{answer_letter}}}"
+
+    messages = [
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": assistant_content}
+    ]
+
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False
+    )
+
+# === Load MMLU Machine Learning Dataset ===
+mmlu_ds = load_mmlu_dataset("machine_learning", split="test")
+mmlu_text_ds = mmlu_ds.map(lambda x: {"text": build_mmlu_sft_text(x, tokenizer)})
+print("Loaded MMLU ML dataset with", len(mmlu_text_ds), "rows")
+
+# Set the training dataset - you can mix and match datasets here
+train_dataset = mmlu_text_ds
+```
+
+
+在真实的生产(非学习)环境下, 实际上只要看一下数据集的数据格式, 再确定好Prompt的格式, 然后用字符串处理一步步转过来就行了, 当然这东西感觉自己手写也并不太容易, 因为(至少对我来说)总是忘记字符串处理函数是什么
+
+
+### MMLU示例
+
+```
+<|im_start|>system
+You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>
+<|im_start|>user
+Choose exactly one correct option from the choices provided.
+Return your answer inside a LaTeX box.
+
+Statement 1| Linear regression estimator has the smallest variance among all unbiased estimators. Statement 2| The coefficients α assigned to the classifiers assembled by AdaBoost are always non-negative.
+
+A. True, True
+B. False, False
+C. True, False
+D. False, True
+
+Answer:<|im_end|>
+<|im_start|>assistant
+\boxed{D}<|im_end|>
+```
+
+## Baseline计算
+
+让预训练好的模型去对测试集做出回答, 计算正确率
+
+```python
+def eval_mcq_accuracy(
+    curr_model,
+    curr_tokenizer,
+    df,
+    max_new_tokens: int = 64,
+    return_details: bool = False,
+):
+    """Evaluate a model on the MCQ dataset using greedy decoding.
+
+    If return_details=True, also return a pandas DataFrame with
+    [idx, question, A, B, C, D, E, gold, decoded, parsed, correct].
+    """
+    curr_model.eval()
+    n = len(df)
+    correct = 0
+    total = 0
+    records = []
+
+    for idx in range(n):
+        row = df.iloc[idx]
+        user_content = build_mcq_prompt(row)
+
+        # Apply chat template for inference
+        messages = [{"role": "user", "content": user_content}]
+        prompt = curr_tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
+        inputs = curr_tokenizer(prompt, return_tensors="pt").to(device)
+
+        with torch.no_grad():
+            outputs = curr_model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+            )
+
+        gen_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+        decoded = curr_tokenizer.decode(gen_tokens, skip_special_tokens=True)
+
+        pred = parse_choice_from_boxed(decoded)
+        is_correct = (pred is not None and pred == row["answer"])
+        if is_correct:
+            correct += 1
+        total += 1
+
+        records.append({
+            "idx": idx,
+            "question": row["question"],
+            "A": row["A"],
+            "B": row["B"],
+            "C": row["C"],
+            "D": row["D"],
+            "E": row["E"],
+            "gold": row["answer"],
+            "prompt": prompt,
+            "decoded": decoded,
+            "parsed": pred,
+            "correct": is_correct,
+        })
+
+        if (idx + 1) % 20 == 0:
+            print(f"Processed {idx + 1}/{n} questions...")
+
+    acc = correct / max(total, 1)
+    print(f"MCQ accuracy: {acc * 100:.2f}% ({correct}/{total})")
+
+    details_df = pd.DataFrame(records)
+    if return_details:
+        return acc, details_df
+    return acc
+
+# === Baseline MCQ accuracy before fine-tuning ===
+print("Evaluating baseline model on MCQ dataset...")
+baseline_acc, baseline_details = eval_mcq_accuracy(
+    model,
+    tokenizer,
+    mcq_df,
+    max_new_tokens=EVAL_MAX_NEW_TOKENS,
+    return_details=True,
+)
+baseline_details.head()
+```
+
+```
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Evaluating baseline model on MCQ dataset...
+Processed 20/25 questions...
+MCQ accuracy: 28.00% (7/25)
+```
+
+<img src="/images/189_hw5/2.png" alt="label_plot" />
+
+
+## 微调
+
+我们用trl(transformer reinforcement learning)来指定微调的参数和启动训练
+
+```python
+# === Set up SFTTrainer ===
+sft_config = SFTConfig(
+    dataset_text_field="text",
+    per_device_train_batch_size=TRAIN_BATCH_SIZE,
+    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+    warmup_steps=WARMUP_STEPS,
+    max_steps=MAX_STEPS,
+    learning_rate=LEARNING_RATE,
+    logging_steps=1,
+    optim=OPTIM,
+    weight_decay=WEIGHT_DECAY,
+    lr_scheduler_type=LR_SCHEDULER_TYPE,
+    seed=SEED,
+    report_to="none",
+)
+
+trainer = SFTTrainer(
+    model=model,
+    args=sft_config,
+    train_dataset=train_dataset,
+    eval_dataset=None,
+    processing_class=tokenizer,
+)
+
+trainer
+```
+
+```python
+# === Fine-tune the model ===
+model.train()
+trainer.train()
+model.eval()
+```
+
+## 微调后的绩效计算
+
+直接把微调后的模型放到测试集上评估一次就好了
+
+```python
+# === Evaluate MCQ accuracy after fine-tuning ===
+print("Evaluating fine-tuned model on MCQ dataset...")
+ft_acc, ft_details = eval_mcq_accuracy(
+    model,
+    tokenizer,
+    mcq_df,
+    max_new_tokens=EVAL_MAX_NEW_TOKENS,
+    return_details=True,
+)
+ft_details.head()
+print(f"Baseline acc: {baseline_acc:.4f}, Fine-tuned acc: {ft_acc:.4f}")
+```
+
+```
+Evaluating fine-tuned model on MCQ dataset...
+Processed 20/25 questions...
+MCQ accuracy: 28.00% (7/25)
+Baseline acc: 0.2800, Fine-tuned acc: 0.2800
+```
