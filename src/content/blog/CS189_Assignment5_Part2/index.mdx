@@ -1,0 +1,335 @@
+---
+title: 'UC Berkeley CS189 Assignment 5(Part 2)'
+description: 'CS189 Assignment5 Notes'
+publishDate: '2026-2-28'
+tags: ['CS189']
+# heroImage: { src: './thumbnail.jpg', alt: '作业封面图片' }
+# heroImage: {}
+language: '中文'
+draft: false
+---
+
+import { Aside } from 'astro-pure/user'
+
+# CS189 Assignment 5
+
+## 项目简介
+
+这一次我们把微调的训练集从mmlu换成Ceval数据集, 其他的和Part1保持一致, 所以我们要改写Prompt工程的代码以适配Ceval数据集
+
+[Ceval数据集](https://cevalbenchmark.com/index_zh.html)
+
+## 制作微调数据集的Prompt工程
+
+### 加载
+
+```python
+
+def load_ceval_dataset(subset,split="test"):
+    datasets=[]
+    print(f"Loading ceval dataset (subset={subset}, split={split})...")
+
+    for subset in subset:
+        ds = load_dataset("ceval/ceval-exam", subset, split=split)
+        datasets.append(ds)
+        
+    return datasets
+
+def build_ceval_prompt(row):
+    q=str(row["question"]).strip()
+    choices=row["choices"]
+
+    options_list=[]
+    for i,choice in enumerate(choices):
+        letter=chr(ord("A")+i)
+        options_list.append(f"{letter}. {choice}")
+
+    options_str="\n".join(options_list)
+
+    prompt = (
+        "Choose exactly one correct option from the choices provided.\n"
+        "Return your answer inside a LaTeX box.\n\n"
+        f"{q}\n\n{options_str}\n\nAnswer:"
+    )
+    return prompt
+
+def build_ceval_sft_text(row,tokenizer):
+    user_content = build_ceval_prompt(row)
+
+    answer_int = row["answer"]
+    answer_letter = chr(ord("A") + answer_int)
+    assistant_content = f"\\boxed{{{answer_letter}}}"
+
+    messages = [
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": assistant_content}
+    ]
+
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False
+    )
+
+science_subsets = [
+    "middle_school_physics","high_school_physics","college_physics",
+    "middle_school_chemistry","high_school_chemistry","college_chemistry",
+    "middle_school_biology","high_school_biology",
+    "middle_school_mathematics","high_school_mathematics","advanced_mathematics",
+    "probability_and_statistics",
+    "middle_school_geography","high_school_geography",
+    "basic_medicine","clinical_medicine","physician",
+    "plant_protection","veterinary_medicine",
+    "environmental_impact_assessment_engineer",
+]
+
+cs_subsets = [
+    "college_programming", "computer_architecture", "computer_network",
+    "operating_system", "discrete_mathematics", "logic"
+]
+subset=science_subsets+cs_subsets
+
+
+# === Load CEVAL Machine Learning Dataset ===
+CEVAL_ds=load_ceval_dataset(subset=subset,split='test')
+
+CEVAL_ds = concatenate_datasets(CEVAL_ds) 
+
+
+```
+
+大体上和之前差不多, 只不过现在是4选1而不是5选1
+
+### 查看Prompt基本信息
+```python
+# 基本信息
+print("size:", len(CEVAL_ds))
+print("columns:", CEVAL_ds.column_names)
+print("features:", CEVAL_ds.features)
+
+# 看前 5 条（注意：若很大不要全部 to_pandas）
+for i in range(5):
+    print(i, CEVAL_ds[i])   # 打印字典形式的单条样本
+```
+
+```
+size: 5195
+columns: ['id', 'question', 'A', 'B', 'C', 'D', 'answer', 'explanation']
+features: {'id': Value('int32'), 'question': Value('string'), 'A': Value('string'), 'B': Value('string'), 'C': Value('string'), 'D': Value('string'), 'answer': Value('string'), 'explanation': Value('string')}
+0 {'id': 0, 'question': '关于信息的传递，下列说法正确的是____', 'A': '北斗卫星定位系统可提供全天候即时定位服务', 'B': '5G网络通信主要是利用光导纤维传递信息的', 'C': '手机话筒的主要作用是把声音信号变成恒定电流', 'D': '电磁波只能传递声音信号，不能传递图像信号', 'answer': 'A', 'explanation': ''}
+1 {'id': 1, 'question': '下列说法符合实际情况的是____', 'A': '人的正常体温约为39℃', 'B': '成年人步行的速度约为1.1m/s', 'C': '中学生的体重约为50N', 'D': '一个篮球的体积约为1m3', 'answer': 'B', 'explanation': ''}
+2 {'id': 2, 'question': '下列关于测量仪器的分析正确的是____', 'A': '水银温度计利用了液体热胀冷缩的原理', 'B': '托盘天平利用了省力杠杆的原理', 'C': '电能表利用电流的热效应工作', 'D': '液体压强计利用了连通器的原理', 'answer': 'A', 'explanation': ''}
+3 {'id': 3, 'question': '关于分子动理论，下列说法中不正确的是____', 'A': '物质是由大量分子组成的', 'B': '温度越高，分子的运动越剧烈', 'C': '分子是组成物质的最小微粒', 'D': '固体很难被压缩，说明分子间存在斥力', 'answer': 'C', 'explanation': ''}
+4 {'id': 4, 'question': '有关安全用电，下列做法错误的是____', 'A': '使用验电笔时手要接触验电笔后端金属部分', 'B': '为了使用方便，可以剪掉三脚插头中保护接地线的插脚', 'C': '接入漏电保护器，可以在导线漏电、电器短路等故障时断开电路起保护作用', 'D': '高压线发生断线落地时，人不能靠近落地处', 'answer': 'B', 'explanation': ''}
+```
+
+### 调整成最终的格式
+
+```python
+from datasets import concatenate_datasets
+import re
+
+# 如果 CEVAL_ds 是列表先合并
+if isinstance(CEVAL_ds, list):
+    CEVAL_ds = concatenate_datasets(CEVAL_ds)
+
+# 先把原始 CEVAL 映射为标准的 A/B/C/D/E 字段（如果你之前已有 mcq_ds 可跳过这步）
+def to_mcq_format(example):
+    return {
+        "id": example.get("id", None),
+        "question": str(example.get("question", "") or "").strip(),
+        "A": example.get("A", "") or "",
+        "B": example.get("B", "") or "",
+        "C": example.get("C", "") or "",
+        "D": example.get("D", "") or "",
+        "E": example.get("E", "") or ""  # 保留 E 列（若无则为空）
+    }
+
+mcq_ds = CEVAL_ds.map(to_mcq_format)
+
+# 把 A-D(可选E) 合并成 choices 列，并把字母答案转为数值 label（0..）
+def add_choices_and_numeric_answer(example):
+    choices = [example.get("A",""), example.get("B",""), example.get("C",""), example.get("D","")]
+    if example.get("E"):
+        choices.append(example.get("E",""))
+    m = re.search(r"([A-E])", str(example.get("answer","")).upper())
+    label = (ord(m.group(1)) - ord("A")) if m else None
+    return {"choices": choices, "answer": label}
+
+mcq_ds = mcq_ds.map(add_choices_and_numeric_answer)
+
+# 过滤掉无法解析到 label 的样本（可选）
+mcq_ds = mcq_ds.filter(lambda x: x["answer"] is not None)
+
+# 现在直接调用现有的 build_mmlu_sft_text（它期望 choices 列和 numeric answer）
+CEVAL_text_ds = mcq_ds.map(lambda x: {"text": build_ceval_sft_text(x, tokenizer)})
+
+print("Loaded CEVAL (converted) with", len(CEVAL_text_ds), "rows")
+print("example text:\n", CEVAL_text_ds[0]["text"])
+```
+
+```
+Loaded CEVAL (converted) with 5195 rows
+example text:
+ <|im_start|>system
+You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>
+<|im_start|>user
+Choose exactly one correct option from the choices provided.
+Return your answer inside a LaTeX box.
+
+关于信息的传递，下列说法正确的是____
+
+A. 北斗卫星定位系统可提供全天候即时定位服务
+B. 5G网络通信主要是利用光导纤维传递信息的
+C. 手机话筒的主要作用是把声音信号变成恒定电流
+D. 电磁波只能传递声音信号，不能传递图像信号
+
+Answer:<|im_end|>
+<|im_start|>assistant
+\boxed{A}<|im_end|>
+```
+
+可以看到这已经和之前的格式一样了
+
+## 计算训练baseline
+
+和之前一样, 直接用他给的`eval_mcq_accuracy`就行了, 不再赘述
+
+## 调整训练参数
+
+```python
+# === Set up SFTTrainer ===
+sft_config = SFTConfig(
+    dataset_text_field="text",
+    per_device_train_batch_size=TRAIN_BATCH_SIZE,
+    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+    warmup_steps=WARMUP_STEPS,
+    # num_train_epochs=NUM_TRAIN_EPOCHS,
+    max_steps=MAX_STEPS,
+    learning_rate=LEARNING_RATE,
+    logging_steps=1,
+    optim=OPTIM,
+    weight_decay=WEIGHT_DECAY,
+    lr_scheduler_type=LR_SCHEDULER_TYPE,
+    seed=SEED,
+    report_to="none",
+
+    eval_strategy=EVALUATION_STRATEGY,
+    eval_steps=EVAL_STEPS,                    # 每50步评估一次
+    save_steps=SAVE_STEPS,
+    load_best_model_at_end=LOAD_BEST_MODEL_AT_END,
+    metric_for_best_model=METRIC_FOR_BEST_MODEL,
+    greater_is_better=GREATER_IS_BETTER,
+    save_total_limit=SAVE_TOTAL_LIMIT,
+)
+
+# early_stopping_callback = EarlyStoppingCallback(
+#     early_stopping_patience=10,
+# )
+
+trainer = SFTTrainer(
+    model=model,
+    args=sft_config,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+    processing_class=tokenizer,
+    # callbacks=[early_stopping_callback],
+)
+
+trainer
+```
+
+```
+| 参数 | 说明 |
+|------|------|
+| `dataset_text_field` | 指定数据集中存储训练文本的字段名，SFTTrainer 会自动从中提取数据进行训练 |
+| `per_device_train_batch_size` | 每个 GPU/CPU 设备上的 batch 大小，越大训练越快但需要更多显存 |
+| `gradient_accumulation_steps` | **梯度累积**：当显存不够时，用小 batch 模拟大 batch。实际 batch = `batch_size × accumulation_steps` |
+| `warmup_steps` | 学习率预热步数，训练初期学习率从 0 逐渐增加到设定值，稳定训练 |
+| `max_steps` | 最大训练步数，与 `num_train_epochs` 二选一 |
+| `learning_rate` | 学习率，推荐 1e-5 ~ 5e-5，过大容易不收敛 |
+| `logging_steps` | 每几步记录一次日志（loss、学习率等） |
+| `optim` | 优化器，`adamw_8bit` 是 8-bit AdamW，节省显存 |
+| `weight_decay` | 权重衰减（L2 正则化），防止过拟合，通常 0.01~0.1 |
+| `lr_scheduler_type` | 学习率调度器：`linear`、`cosine`、`constant` 等 |
+| `seed` | 随机种子，保证实验可复现 |
+| `report_to` | 设为 `"none"` 关闭 wandb/tensorboard 等远程记录 |
+| `eval_strategy` | 评估策略：`"no"`、`"steps"`、`"epoch"` |
+| `eval_steps` | 每多少步评估一次 |
+| `save_steps` | 每多少步保存一次检查点 |
+| `load_best_model_at_end` | 训练结束后自动加载验证集上表现最好的模型 |
+| `metric_for_best_model` | 用于选择最佳模型的指标名 |
+| `greater_is_better` | 该指标是否越大越好（如 accuracy 是，loss 否） |
+| `save_total_limit` | 最多保存几个检查点，超过会删除旧的 |
+```
+
+调整参数是一个经验性的问题, 这里我调整的并不多, 因为主要还是把这个实验跑通而不是在测试集上做的特别完美
+
+```
+# ============================================================================
+# === CONFIGURATION - ALL SETTINGS IN ONE PLACE ===
+# ============================================================================
+
+# --- Model Configuration ---
+MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct" # YOU CANNOT CHANGE THIS
+
+# --- Dataset Configuration ---
+#TODO: REPLACE WITH YOUR OWN PATH
+MCQ_CSV_PATH = "hw5_sample_eval.csv"  # Path to CS189 MCQ sample eval dataset
+
+# --- Training Configuration (feel free to adjust!) ---
+TRAIN_BATCH_SIZE = 2
+GRADIENT_ACCUMULATION_STEPS = 2
+WARMUP_STEPS = 5
+MAX_STEPS = 500  # or set num_train_epochs instead
+NUM_TRAIN_EPOCHS=10
+LEARNING_RATE = 5e-5
+WEIGHT_DECAY = 0.01
+LR_SCHEDULER_TYPE = "cosine"
+OPTIM = "adamw_8bit"  # requires bitsandbytes
+
+SEED = 189
+
+# --- Evaluation Configuration ---
+EVAL_MAX_NEW_TOKENS = 64  # How many tokens to generate for inference
+OUTPUT_DIR = "./mcq_finetuned_model"
+EVALUATION_STRATEGY="steps"
+EVAL_STEPS=50
+SAVE_STEPS=50
+LOAD_BEST_MODEL_AT_END=True
+METRIC_FOR_BEST_MODEL="eval_loss"
+GREATER_IS_BETTER=False
+SAVE_TOTAL_LIMIT=3
+```
+
+## 启动训练
+
+```python
+# === Fine-tune the model ===
+model.train()
+trainer.train()
+model.eval()
+```
+
+## 最终绩效
+
+```python
+# === Evaluate MCQ accuracy after fine-tuning ===
+print("Evaluating fine-tuned model on MCQ dataset...")
+ft_acc, ft_details = eval_mcq_accuracy(
+    model,
+    tokenizer,
+    mcq_df,
+    max_new_tokens=EVAL_MAX_NEW_TOKENS,
+    return_details=True,
+)
+ft_details.head()
+print(f"Baseline acc: {baseline_acc:.4f}, Fine-tuned acc: {ft_acc:.4f}")
+```
+
+```
+Evaluating fine-tuned model on MCQ dataset...
+Processed 20/25 questions...
+MCQ accuracy: 32.00% (8/25)
+Baseline acc: 0.2800, Fine-tuned acc: 0.3200
+```
