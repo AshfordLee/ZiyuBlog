@@ -1,0 +1,72 @@
+---
+title: 'RL Course Notes (Part 1)'
+description: 'RL Course Notes (Part 1)'
+publishDate: '2026-4-21'
+tags: ['RL']
+# heroImage: { src: './thumbnail.jpg', alt: '作业封面图片' }
+# heroImage: {}
+language: '中文'
+draft: false
+---
+
+import { Aside } from 'astro-pure/user';
+
+
+# RL Course Notes (Part 1)
+
+
+## 课程简介
+
+本课程使用的是西湖大学赵世钰老师的 "强化学习的数学原理" 课程, B站链接为[官方课程链接](https://www.bilibili.com/video/BV1sd4y167NS/?spm_id_from=333.337.search-card.all.click&vd_source=008fc8e08087f6de5f2056418f7d3530),
+书的官方仓库为[课本官方repo](https://github.com/MathFoundationRL/Book-Mathmatical-Foundation-of-Reinforcement-Learning)
+
+本课程为理论课, 几乎无代码, 实际上现在学RL的coding比理论也快得多, 毕竟天天让Agent写RL的各种组件, 看多了总归是"熟读唐诗三百首, 不会吟诗也会吟"
+
+## 学习动机
+
+最近在FeelingAi做Research Intern, 第一篇文章的Idea(向我的带教潘薪宇博士致敬)就是关于如何使用RL让Agent自己决策Agent Memory的"增删查改",
+事实上我觉得很多算法的idea都是比较直观的, 但是在设计RL的过程中, 我对其背后原理没什么理解, 于是过来补课
+
+之前我有看过一些别人写的notes, 其实RL用到的数学知识并不难(无非工科一二年级三件套), 问题就是notation写的太垃圾让人看不懂. 我感觉工科Researcher并不在乎他们写的equation
+是否真的能让人轻松看懂(可能确实也没什么人去看毕竟paper里面放一个equation会减少50%的读者, 再放一个会再减少50%), 或者因为本身equation就不多, 大不了别人看不懂的时候他再去解释, 我觉得这是个非常不好的习惯, 尤其是对于Junior Researcher和
+想学习算法背后数学原理的人来说, 会让学习效率大打折扣。
+
+最后不得不说, 能把RL的math notation写的看起来比PDE还复杂, 确实是有点艺术细胞在身上的。
+
+
+## 第一章: 基本概念
+
+### 例子: 机器人走格子
+RL当中有一些概念, 用一个经典的例子:grid world example(机器人走格子)来解释
+
+<img src="/images/RL_1/image1.png" alt="label_plot" />
+
+机器人从Start出发, 每次走一格, 那显然在每一格上都有很多的选择, 比如往上下左右走一格, 或者原地保持不动, 在RL中把这个可以自己做出决策(动作)的机器人叫做Agent
+
+有一个初始状态(Start), 一个最终目标(Target)和一些我们不希望Agent(用来指代这个机器人)走进的地方
+
+我们的RL算法就是要找到, 或者说推理出一个好的动作序列, 让Agent从Start走到Target
+
+在这个例子里面, "好"是比较好衡量的, 明显Agent如果不撞墙, 不走到Forbidden Area里面并且尽快的走到Target就是好的。这个例子里的格子叫做Environment(环境), 显然Agent是知道环境的全貌的,
+从而可以轻松的弄出一个好的算法, 但如果不知道环境的全部, 而只是能在和环境交互(比如走到某个新的格子里面)的时候得到一个反馈, 那要找一个最优算法也许就不容易了。
+
+### 概念: State(状态)和Action(动作)
+
+<img src="/images/RL_1/image2.png" alt="label_plot" />
+
+抽象的来说, Agent会在环境中处于不同的"位置", 我们可以认为总存在一个环境的有限划分, 然后每一个划分中的元素就是一个State(状态)
+
+所有的State合起来就是集合$\mathcal{S}$, 比如说在这里9个位置的$\mathcal{S} = \{s_1 ... s_9\}$
+
+动作集合指的是Agent能干的事情, 比如说可以上下左右的移动, 或者原地不动, 把这五个动作编号一下就得到$\mathcal{A} = \{a_1 ... a_5\}$
+
+注意这里的notation, 显然动作是状态的映射, 在不同的状态上能做的动作是不同的, 比如在这个case下Agent在最下面一行他就不能再往下走了, 
+又比如说$\mathcal{A(s_1)} = \{a_2, a_3, a_5\}$
+
+
+
+
+
+
+
+
