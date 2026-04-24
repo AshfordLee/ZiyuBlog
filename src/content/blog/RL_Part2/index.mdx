@@ -1,0 +1,154 @@
+---
+title: 'RL Course Notes (Part 2)'
+description: 'RL Course Notes (Part 2)'
+publishDate: '2026-4-24'
+tags: ['RL']
+# heroImage: { src: './thumbnail.jpg', alt: '作业封面图片' }
+# heroImage: {}
+language: '中文'
+draft: false
+---
+
+import { Aside } from 'astro-pure/user';
+
+
+# RL Course Notes (Part 2)
+
+## 第二章: 状态值(State Value)和贝尔曼方程(Bellman Equation)
+
+### 回报与策略
+
+衡量一个策略好与坏的直接方式就是写出从起点到Target的轨迹然后计算回报, 以书上的一个简单例子来说明
+
+<img src="/images/RL_2/image1.png" alt="label_plot" />
+
+图上已经写明了三种策略和Reward了, 注意这三条轨迹都是无穷轨迹, 因为走到了Target之后他们都会不定的原地打转, 所以算回报的时候要算无穷级数的和
+
+计算过程就省略了(不记得了可以去翻翻数学分析算级数的那部分), 结果是
+
+$$
+Return_{1} = \frac{\gamma}{1 - \gamma} \\ 
+Return_{2} = -1 + \frac{\gamma}{1 - \gamma} \\ 
+Return_{3} = -0.5 + \frac{\gamma}{1 - \gamma}
+$$
+
+所以
+$$
+Return_{1} > Return_{3} > Return_{2}
+$$
+
+所以策略1是最好的, 策略2是最差的
+
+### 计算回报的方法
+
+书上给了一个比较特殊的例子:
+
+<img src="/images/RL_2/image2.png" alt="label_plot" />
+
+以$v_{i}$记状态$s_{i}$的回报, 根据之前的公式"回报为之后的所有奖励求无穷和"可以得到
+
+<img src="/images/RL_2/image3.png" alt="label_plot" />
+
+每一行里面又可以做迭代(注意前面已经证明了在有折扣因子$\gamma$存在的条件下, 级数是绝对收敛的, 所以这个迭代可以进行)
+
+<img src="/images/RL_2/image4.png" alt="label_plot" />
+
+这样一来, 得到一个可解的线性非其次方程组, 可以通过Gauss消元或者矩阵代数的方法去解这个方程组:
+
+<img src="/images/RL_2/image5.png" alt="label_plot" />
+
+实际上就是矩阵方程
+
+$$
+v = r + \gamma Pv \\ 
+v = (E - \gamma P)^{-1}r
+$$
+
+这就是这个简单例子的贝尔曼方程, 实际上针对任意的情况, 思路都是一样的, 也就是状态的回报是相互依赖的, 所以总能写成一个可解的矩阵方程的形式
+
+### 状态值(State Value)
+
+我们先引入一种notation, 用来描述状态之间的转换, 用自然语言描述就是: 在状态$S_t$执行了策略$\pi$输出的动作$A_t$, 然后状态转移到了$S_{t+1}$, 并获得了立即奖励$R_{t+1}$
+
+$$
+S_t \xrightarrow{{A_t}} S_{t+1}, R_{t+1}
+$$
+
+不严格的证明, 这里的$S_{t}, S{t+1}, A_{t}, R_{t+1}$都是随机变量, 因为他们都是从一系列的状态空间当中抽取出来的
+
+所以对于任意的t, 我们可以得到一条从$S_t$出发的轨迹:
+
+$$
+S_t \xrightarrow{{A_t}} S_{t+1}, R_{t+1} \xrightarrow{{A_{t+1}}} S_{t+2}, R_{t+2} \xrightarrow{{A_{t+2}}} ...
+$$
+
+根据前面的定义, t状态下(或者说从t状态出发)的折扣回报(沿着这条轨迹)为
+
+$$
+G_t = R_{t+1} + \gamma R_{t+2} + \gamma^2 R_{t+3} + ...
+$$
+
+$G_t$也是随机变量, 所以可以对他求期望, 同时注意到$G_t$依赖于$S_t$, 所以可以用以下的条件期望来表示:"在某种状态下执行某种策略所得到的折扣回报的期望"
+
+$$
+v_{\pi}(s) = \mathbb{E}[G_t|S_t = s]
+$$
+
+之所以有期望这个说法是因为就算给定了策略和状态t, 每次的轨迹是一个采样而不是一个确定性的东西(因为策略可能会以概率输出不同的动作)
+
+注意他是不依赖于时间t的, 实际上可以这么想, 无论在什么时间, 只要给定策略, 走到s这个状态, $v_{\pi}(s)$就已经确定了, 实际上他只依赖于策略和状态
+
+### 贝尔曼方程
+
+前面讲了一个简单例子的贝尔曼方程, 现在进行一般情况下的抽象推导:
+
+$$
+G_t = R_{t+1} + \gamma R_{t+2} + \gamma^2 R_{t+3} + ... \\
+= R_{t+1} + \gamma G_{t+1}
+$$
+
+第二个等号的迭代来自于级数的绝对收敛性
+
+再考虑状态值的定义
+
+$$
+v_{\pi}(s) = \mathbb{E}[G_t|S_t = s] \\ 
+= \mathbb{E}[R_{t+1} + \gamma G_{t+1}|S_t = s]
+= \mathbb{E}[R_{t+1}|S_t = s] + \gamma \mathbb{E}[G_{t+1}|S_t = s]
+$$
+
+最后一个等号来自于期望的线性性质, 接下来可以对两项进行拆分:
+
+$$
+\mathbb{E}[R_{t+1}|S_t = s] = \sum_{a \in \mathcal{A}} \pi(a|s) \mathbb{E}[R_{t + 1} | S_t = s, A_t = a] \\
+= \sum_{a \in \mathcal{A}} \pi(a|s) \sum_{r \in \mathcal{R}}p(r|s, a)r
+$$
+
+这里其实就是两次应用期望的定义, 要搞清楚获得这个$R_{t+1}$其实需要双重的概率, 一个是"做什么动作"的概率, 一个是"这个动作获得什么奖励"的概率, 所以只需要进行两次求和即可
+
+对于第二项也是同样的道理, 先按照状态拆分, 这里需要一点trick, 我们可以给这个期望的条件"加上一个":
+
+$$
+\mathbb{E}[G_{t+1}|S_t = s] = \sum_{s' \in \mathcal{S}} \mathbb{E}[G_{t+1}|S_t = s, S_{t+1} = s']p(s'|s) \\
+= \sum_{s' \in \mathcal{S}} \mathbb{E}[G_{t+1}|S_{t+1} = s']p(s'|s)  \\
+= \sum_{s' \in \mathcal{S}} v_{\pi}(s')p(s'|s) \\ 
+= \sum_{s' \in \mathcal{S}} v_{\pi}(s') \sum_{a \in \mathcal{A}} \pi(a|s')p(s'|s, a)
+$$
+
+套路都是一样的, 只要注意第二个等号是由于马尔可夫性质就好
+
+综合以上两项然后提取出公因子, 就得到一般形式的贝尔曼方程:
+
+
+<img src="/images/RL_2/image6.png" alt="label_plot" />
+
+接下来要明确贝尔曼方程里什么是已知的, 什么是要求的
+
+$v_{\pi}(s)$和$v_{\pi}(s')$是未知的, 也是最后要解的, 这必须通过联立所有的状态的贝尔曼方程来解决(类似前面例子里面的矩阵代数求解)
+
+$\pi(a|s)$是已知的, 因为他是策略, 是给定的
+
+$p(r|s, a)$和$p(s'|s, a)$是已知的, 因为他是环境模型, 是给定的
+
+$r$是已知的, 因为他是奖励函数, 是给定的
+
