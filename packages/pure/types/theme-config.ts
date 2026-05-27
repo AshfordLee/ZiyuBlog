@@ -185,7 +185,15 @@ export const ThemeConfigSchema = () =>
 
       /** Share buttons to show */
       share: ShareSchema()
-    })
+    }),
+
+    /** Password protected transcript configuration */
+    transcript: z
+      .object({
+        /** Password to access transcript */
+        password: z.string().describe('Password to access transcript')
+      })
+      .optional()
   })
 
 export type ThemeUserConfig = z.input<ReturnType<typeof ThemeConfigSchema>>

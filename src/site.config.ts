@@ -1,5 +1,8 @@
 import type { CardListData, Config, IntegrationUserConfig, ThemeUserConfig } from 'astro-pure/types'
 
+// Environment variables (set in Vercel Dashboard, not in code)
+const transcriptPassword = import.meta.env.TRANSCRIPT_PASSWORD
+
 export const theme: ThemeUserConfig = {
   // [Basic]
   /** Title for your website. Will be used in metadata and as browser tab title. */
@@ -52,6 +55,8 @@ export const theme: ThemeUserConfig = {
       // { title: 'Docs', link: '/docs' },
       { title: 'Projects', link: '/projects' },
       { title: 'Links', link: '/links' },
+      { title: 'CV', link: '/cv/resume.pdf' },
+      { title: 'Transcript', link: '/transcript' }
       // { title: 'About', link: '/about' }
     ]
   },
@@ -96,7 +101,12 @@ export const theme: ThemeUserConfig = {
     blogPageSize: 8,
     // Currently support weibo, x, bluesky
     share: ['weibo', 'x', 'bluesky']
-  }
+  },
+
+  // Password protected transcript (only enable when password is set)
+  transcript: transcriptPassword ? {
+    password: transcriptPassword
+  } : undefined
 }
 
 export const integ: IntegrationUserConfig = {
