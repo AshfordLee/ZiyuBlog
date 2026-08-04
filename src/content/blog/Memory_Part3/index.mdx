@@ -1,0 +1,108 @@
+---
+title: 'Agent Memory Research In MMLab (Part 3)'
+description: 'Memory Research Part3'
+publishDate: '2026-8-4'
+tags: ['MMLab']
+# heroImage: { src: './thumbnail.jpg', alt: '作业封面图片' }
+# heroImage: {}
+language: '中文'
+draft: false
+---
+
+import { Card, Button } from 'astro-pure/user'
+
+
+# 文档说明
+
+本文档说明训练的动作空间，设计，损失，概率图模型和优化器
+
+## 一阶段动作空间
+
+一阶段的决策非常简单，模型只要在一个两层子树上面，找到一个节点把新fact挂上去就行了，鉴于二层子树中第二层的aspect是不确定的
+所以用transformer来支持变长输入，假设有1个root和K个第二层的aspect，那么输出的logits的长度显然是1+K
+
+得到logits后只要argmax一下就行了
+
+Ground Truth也很简单，因为LLM他也是选一个node挂上去，所以Ground Truth就是一个one-hot的向量，这里的loss设计为他们的CE loss
+
+
+## 二阶段动作空间
+
+这里复杂得多，我们假设一些前提：
+1. 闭包(Part1中说了闭包是什么)只有第三层，即启动这个闭包的fact的兄弟fact才能被操作
+2. 每个可被操作的fact只能被操作一次，不能既参与A操作又参与B操作
+3. 记可操作fact的数量为K
+4. 记最后一层的aspect的数量为M，显然，M可以为0
+
+
+有了上面这些假设，就可以做如下的设计了
+
+网络输出三个logits, 如下:
+```
+type_logits # [K,4]
+down_logits # [K,M]
+group_logits # [K,K]
+```
+
+这些logits语义是很明确的，对于K个fact中的每一个，有4种动作决策
+
+对于K个fact当中的每一个，如果要执行demote操作，那么要在M个demote的对象aspect当中选一个
+
+对于K个fact当中的每一个，他可以和其他的fact做group
+
+Ground Truth空间没这么简单，显然对于type_logits，是行one-hot的，demote_logits也是，然后group_logits是对称的0/1矩阵
+
+这样一来的话，一系列的动作就可以用这三个矩阵来描述了
+
+## 条件loss设计
+
+现在的loss衡量的是：我们模型的输出logits和ground truth差多少，这个差用element-wise来衡量，但这里有一个conditional，
+说简单点就是如果对于一个fact，GroundTruth不认为他参与了Demote操作，就不应该考虑他的Demote Logits之间的loss，Group同理
+
+所以这个element-wise的MLE loss应该设计为：
+
+$$
+\begin{aligned}
+L = \frac{1}{K} \sum_{i=1}^{K} \Bigg[ &
+\text{CE}\left( z^{\text{type}}_i + \tau \cdot \log \pi,\ t_i \right) \\
+&+ \mathbf{1}[t_i = \text{DOWN}] \cdot \text{CE}\left( z^{\text{down}}_i,\ m_i \right) \\
+&+ \mathbf{1}[t_i = \text{GROUP}] \cdot \frac{1}{|V_i|} \sum_{j \in V_i} \text{BCE}\left( z^{\text{grp}}_{ij},\ \mathbf{1}[j \in G_i] \right) \Bigg]
+\end{aligned}
+$$
+
+
+其中 $V_i = \{j : j≠i\}$
+## 概率图模型，优化器
+
+前面已经说过了，logits空间和ground truth空间不是一个空间，所以说如果要执行logits所代表的操作，需要有一个类似编译器的东西
+把logits送到一个可执行动作，这就是概率图模型
+
+简单来说是这样的，概率图模型是一个势函数$\phi$，给定一组logits:$\theta$，对于这个logits空间所对应的那个ground truth空间
+里的任意的动作$\sigma$，总有一个概率$\phi_{\theta}(\sigma)$, 接下来要找使得前面这个概率最大的$\sigma$
+
+所以我们需要:
+1. 设计势函数$\phi$
+2. 找到优化器, 使得不穷举ground truth空间里面所有的$\sigma$, 而是通过逐步优化的方式提高概率，最后达到OPTIMAL
+
+幸运的是优化器不需要我们自己写，因为ground truth空间是一个闭式描述空间，然后目标函数$\phi$可以被设计成线性的或者对数线性的，
+所以实际上被转化为一个规划问题
+
+$$
+\begin{aligned}
+\phi_\theta(\sigma) = \prod_{i=1}^{K} &\, p_\theta(t_i) \\
+\cdot \prod_{\substack{i=1 \\ t_i = \text{DOWN}}}^{K} &\, p_\theta(m_i \mid \text{DOWN}) \\
+\cdot \prod_{\substack{i=1 \\ t_i = \text{GROUP}}}^{K} & \prod_{j \neq i} q_{ij}^{\mathbf{1}[j \in G_i]} \cdot (1 - q_{ij})^{\mathbf{1}[j \notin G_i]}
+\end{aligned}
+$$
+
+其中
+
+$$
+\begin{aligned}
+& p_\theta(t_i) = \text{softmax}\bigl( z^{\text{type}}_i \cdot \log \pi \bigr)[t_i] \quad  \\
+& p_\theta(m_i \mid \text{DOWN}) = \text{softmax}( z^{\text{down}}_i )[m_i] \\
+& q_{ij} = \text{sigmoid}( z^{\text{grp}}_{ij} )
+\end{aligned}
+$$
+
+优化器用的是OR-Tools CP-SAT
