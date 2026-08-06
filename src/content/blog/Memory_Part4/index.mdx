@@ -35,6 +35,14 @@ import { Card, Button } from 'astro-pure/user'
 
 用gpt5.6-sol当强模型，直接分别给ref, teacher, student树打分如下(理论上student的分不可能超过teacher)
 
+盘踞大概是这样：假如一棵树有100个fact，LLM去逐个判断每个fact和他父亲的关系的合理性，得到一个百分比，比如说50个fact是合理的，那这个值就是0.5
+
+接下来再做很多次(比如说10次)，这10次就把fact随机乱放，然后每次能得到一个百分比，这个百分比大概率很低，因为乱放可能只有5个fact合理，平均可能也是5%左右
+
+然后再考虑超额，超额=树的合理百分比-随机乱放的平均百分比即可
+
+当然了，因为随便乱放的baseline大概率趋于0，也可以不剪掉，直接看合理程度就行了
+
 <img src="/images/memory_part4/image2.png" alt="label_plot" />
 
 从这个图上可以看出来，teacher的质量其实也一般，或者说teacher在看不到ref_tree的情况下，应该不太可能做到比较好
